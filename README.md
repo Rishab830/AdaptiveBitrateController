@@ -44,6 +44,10 @@ Vercel stores and forwards SDP/ICE signaling metadata only. WebRTC media does no
 4. Use browser network throttling or different physical networks to observe the host dashboard change per-viewer quality every two seconds.
 5. The decision panel identifies whether a Q-table entry or the conservative unseen-state fallback made the decision.
 
+The Server dashboard's **Adaptation mode** control switches between Balanced RL, Quality RL, Stall Avoidant RL, and Manual quality. A compatible trained table is preferred. When one is unavailable, the selected safety controller probes upward after stable delivery instead of remaining permanently at Economy; Manual quality applies the selected level directly.
+
+Ending a room displays a termination dialog to every viewer. Viewer tabs send a leave beacon during refresh/close, while heartbeat expiry releases a slot if the browser cannot deliver that beacon.
+
 Local-file capture and screen sharing are capability-dependent. The UI reports unsupported capture rather than uploading or transcoding the file. Camera/microphone sources generally have the broadest mobile support.
 
 ## Quality levels

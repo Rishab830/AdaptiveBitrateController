@@ -5,10 +5,10 @@ import { Header } from "@/components/header";
 import { Metric } from "@/components/metric";
 import { useSignalPoll } from "@/hooks/use-signal-poll";
 import { QUALITY_LEVELS, formatBitrate } from "@/lib/levels";
-import { getActivePolicy } from "@/lib/policy-storage";
+import { getPolicyForMode } from "@/lib/policy-storage";
 import { discretizeState, selectAction, stateKey } from "@/lib/qlearning";
 import { createRoom, getIceServers, leaveRoom, sendSignal } from "@/lib/signaling-client";
-import type { PeerTelemetry, RoomSession, SignalEnvelope } from "@/lib/types";
+import type { PeerTelemetry, RewardMode, RoomSession, SignalEnvelope } from "@/lib/types";
 import { applyQuality, collectTelemetry, supportedLevelIds } from "@/lib/webrtc";
 
 interface PeerRuntime {
@@ -29,6 +29,9 @@ export default function HostPage() {
   const [error, setError] = useState("");
   const [decision, setDecision] = useState("Waiting for viewers");
   const [persistent, setPersistent] = useState(true);
+  const [adaptationMode, setAdaptationMode] = useState<RewardMode | "manual">("balanced");
+  const [manualLevel, setManualLevel] = useState(2);
+  const [busy, setBusy] = useState("");
   const [capabilities, setCapabilities] = useState({ file: false, camera: false, screen: false });
   const iceServers = useRef<RTCIceServer[]>([]);
 
@@ -41,6 +44,11 @@ export default function HostPage() {
   }, []);
 
   const syncPeers = () => setPeerRows([...peers.current.values()]);
+  async function perform(label: string, action: () => Promise<void>) {
+    if (busy) return;
+    setBusy(label);
+    try { await action(); } finally { setBusy(""); }
+  }
 
   async function installStream(stream: MediaStream, name: string) {
     source.current?.getTracks().forEach((track) => track.stop());
@@ -101,7 +109,14 @@ export default function HostPage() {
       if (pc.iceConnectionState === "failed") setError("A network path could not be established for a viewer. Configure TURN for restrictive networks.");
       syncPeers();
     };
-    pc.onconnectionstatechange = () => { setStatus(`Viewer ${viewerId.slice(-4)}: ${pc.connectionState}`); syncPeers(); };
+    pc.onconnectionstatechange = () => {
+      setStatus(`Viewer ${viewerId.slice(-4)}: ${pc.connectionState}`);
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") peers.current.delete(viewerId);
+      if (pc.connectionState === "disconnected") window.setTimeout(() => {
+        if (pc.connectionState === "disconnected") { pc.close(); peers.current.delete(viewerId); syncPeers(); }
+      }, 8_000);
+      syncPeers();
+    };
     const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
     await sendSignal(session, viewerId, { type: "offer", sdp: offer }); syncPeers();
   }, [session]);
@@ -147,27 +162,27 @@ export default function HostPage() {
       const age = Math.min(...active.map((peer) => (Date.now() - peer.lastSwitch) / 1000));
       const state = discretizeState(telemetry, current, age);
       const viewerCount = active.length as 1 | 2;
-      const policy = await getActivePolicy(viewerCount);
-      const selected = selectAction(policy, state, viewerCount);
+      const policy = adaptationMode === "manual" ? undefined : await getPolicyForMode(viewerCount, adaptationMode);
+      const selected = adaptationMode === "manual"
+        ? { levels: Array(viewerCount).fill(manualLevel) as number[], qValue: 0, fallback: false }
+        : selectAction(policy, state, viewerCount, adaptationMode);
       const allowed = supportedLevelIds(source.current!);
       await Promise.all(active.map(async (peer, index) => {
         const desired = Math.max(...allowed.filter((level) => level <= (selected.levels[index] ?? 0)), allowed[0]);
         if (desired !== peer.level) peer.lastSwitch = Date.now();
         peer.level = desired;
         await applyQuality(peer.pc, desired, source.current!.getVideoTracks()[0]?.getSettings().height);
-        if (peer.channel?.readyState === "open") peer.channel.send(JSON.stringify({ type: "quality", level: desired, fallback: selected.fallback }));
+        if (peer.channel?.readyState === "open") peer.channel.send(JSON.stringify({ type: "quality", level: desired, fallback: selected.fallback, mode: adaptationMode }));
       }));
-      setDecision(`${selected.fallback ? "Safe fallback" : policy?.profile.name}: ${active.map((peer) => QUALITY_LEVELS[peer.level].name).join(" / ")} · state ${stateKey(state)}`);
+      const controller = adaptationMode === "manual" ? "Manual override" : selected.fallback ? `${adaptationMode} safety controller` : policy?.profile.name;
+      setDecision(`${controller}: ${active.map((peer) => QUALITY_LEVELS[peer.level].name).join(" / ")} · state ${stateKey(state)}`);
       syncPeers();
     }, 2000);
     return () => clearInterval(timer);
-  }, [session]);
+  }, [adaptationMode, manualLevel, session]);
 
   async function endRoom() {
-    if (session) {
-      await Promise.all([...peers.current.keys()].map((id) => sendSignal(session, id, { type: "source-ended" }).catch(() => undefined)));
-      await leaveRoom(session).catch(() => undefined);
-    }
+    if (session) await leaveRoom(session).catch(() => undefined);
     peers.current.forEach((peer) => peer.pc.close()); peers.current.clear(); setSession(null); syncPeers(); setStatus("Room ended");
   }
   useEffect(() => () => { source.current?.getTracks().forEach((track) => track.stop()); peers.current.forEach((peer) => peer.pc.close()); }, []);
@@ -175,9 +190,9 @@ export default function HostPage() {
   return <main><Header /><div className="shell host-layout">
     <section><div className="eyebrow"><i /> SERVER MODE</div><h1 className="page-title">Broadcast from this device.</h1>
       <div className="video-stage"><video ref={preview} playsInline /><div className="video-badge">{sourceName}</div></div>
-      <div className="source-bar">{capabilities.file && <label className="button">Local file<input hidden type="file" accept="video/*" onChange={(e) => e.target.files?.[0] && void chooseFile(e.target.files[0])} /></label>}
-        {capabilities.camera && <button className="button" onClick={chooseCamera}>Camera</button>}{capabilities.screen && <button className="button" onClick={chooseScreen}>Share screen</button>}
-        {!session ? <button className="button primary grow" onClick={beginRoom}>Create room</button> : <button className="button danger grow" onClick={endRoom}>End room</button>}</div>
+      <div className="source-bar">{capabilities.file && <label className={`button ${busy ? "disabled" : ""}`}>{busy === "Opening file" ? "Opening file…" : "Local file"}<input disabled={Boolean(busy)} hidden type="file" accept="video/*" onChange={(e) => e.target.files?.[0] && void perform("Opening file", () => chooseFile(e.target.files![0]))} /></label>}
+        {capabilities.camera && <button disabled={Boolean(busy)} className="button" onClick={() => void perform("Starting camera", chooseCamera)}>{busy === "Starting camera" ? "Starting camera…" : "Camera"}</button>}{capabilities.screen && <button disabled={Boolean(busy)} className="button" onClick={() => void perform("Starting share", chooseScreen)}>{busy === "Starting share" ? "Starting share…" : "Share screen"}</button>}
+        {!session ? <button disabled={Boolean(busy)} className="button primary grow" onClick={() => void perform("Creating room", beginRoom)}>{busy === "Creating room" ? "Creating room…" : "Create room"}</button> : <button disabled={Boolean(busy)} className="button danger grow" onClick={() => void perform("Ending stream", endRoom)}>{busy === "Ending stream" ? "Ending stream…" : "End room"}</button>}</div>
       {!capabilities.file && !capabilities.camera && !capabilities.screen && <p className="warning">This browser does not expose a supported media-capture source. Try a current browser over HTTPS.</p>}
       {error && <p className="error">{error}</p>}
     </section>
@@ -188,6 +203,10 @@ export default function HostPage() {
         {peerRows.map((peer) => <article className="client-card" key={peer.id}><div className="row spread"><b>Client {peer.id.slice(-4).toUpperCase()}</b><span className={`status-dot ${peer.pc.connectionState}`} /> </div>
           <div className="metric-grid"><Metric label="Quality" value={QUALITY_LEVELS[peer.level].name} /><Metric label="ICE state" value={peer.pc.iceConnectionState} /><Metric label="Outbound" value={formatBitrate(peer.local?.outboundBitrate ?? 0)} /><Metric label="RTT" value={`${Math.round(peer.local?.rtt ?? 0)} ms`} /><Metric label="Loss" value={`${((peer.remote?.packetLoss ?? peer.local?.packetLoss ?? 0) * 100).toFixed(1)}%`} /></div>
         </article>)}
+      </div>
+      <div className="panel form-grid compact"><label>Adaptation mode<select value={adaptationMode} onChange={(event) => setAdaptationMode(event.target.value as RewardMode | "manual")}><option value="balanced">Balanced RL</option><option value="quality">Quality RL</option><option value="stall-avoidant">Stall Avoidant RL</option><option value="manual">Manual quality</option></select></label>
+        {adaptationMode === "manual" && <label>Quality level<select value={manualLevel} onChange={(event) => setManualLevel(Number(event.target.value))}>{QUALITY_LEVELS.map((level) => <option key={level.id} value={level.id}>{level.name} — {formatBitrate(level.videoBitrate)}</option>)}</select></label>}
+        {adaptationMode !== "manual" && <p className="mode-help">A matching trained Q-table is used when available. Otherwise the safety controller probes upward after a stable interval instead of remaining at Economy.</p>}
       </div>
       <div className="decision panel"><small>RL DECISION</small><p>{decision}</p></div>
       <a className="text-link" href="/train">Train or activate another policy →</a>

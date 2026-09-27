@@ -50,3 +50,10 @@ export async function getActivePolicy(viewers?: 1 | 2) {
   const active = policies.find((policy) => policy.id === id && (!viewers || policy.profile.viewers === viewers));
   return active ?? policies.find((policy) => !viewers || policy.profile.viewers === viewers);
 }
+
+export async function getPolicyForMode(viewers: 1 | 2, rewardMode: QTableArtifact["profile"]["rewardMode"]) {
+  const policies = await listPolicies();
+  const activeId = localStorage.getItem(ACTIVE);
+  return policies.find((policy) => policy.id === activeId && policy.profile.viewers === viewers && policy.profile.rewardMode === rewardMode)
+    ?? policies.find((policy) => policy.profile.viewers === viewers && policy.profile.rewardMode === rewardMode);
+}

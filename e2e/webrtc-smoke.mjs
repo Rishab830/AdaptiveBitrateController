@@ -22,6 +22,7 @@ try {
   const context = await browser.newContext({ permissions: ["camera", "microphone"] });
   const host = await context.newPage();
   const viewer = await context.newPage();
+  const secondViewer = await context.newPage();
   await host.goto(`${baseURL}/host`);
   await host.getByRole("button", { name: "Camera" }).click();
   await host.getByText("Source ready").waitFor();
@@ -42,6 +43,24 @@ try {
     const video = document.querySelector("video");
     return video?.srcObject instanceof MediaStream && video.srcObject.getVideoTracks().length > 0 && video.readyState >= 2;
   }, undefined, { timeout: 20_000 });
+
+  await secondViewer.goto(`${baseURL}/viewer`);
+  await secondViewer.getByPlaceholder("ABC234").fill(code);
+  await secondViewer.getByRole("button", { name: "Join stream" }).click();
+  await secondViewer.getByText("Live", { exact: true }).waitFor({ timeout: 20_000 });
+
+  // Reloading must release the old participant even though Leave was not used.
+  await viewer.reload();
+  await viewer.waitForTimeout(750);
+  await viewer.getByPlaceholder("ABC234").fill(code);
+  await viewer.getByRole("button", { name: "Join stream" }).click();
+  await viewer.getByText("Live", { exact: true }).waitFor({ timeout: 20_000 });
+
+  await host.getByRole("button", { name: "End room" }).click();
+  await viewer.getByRole("heading", { name: "The server ended the stream" }).waitFor({ timeout: 10_000 });
+  await secondViewer.getByRole("heading", { name: "The server ended the stream" }).waitFor({ timeout: 10_000 });
+  await viewer.getByRole("button", { name: "Back to client page" }).click();
+  await viewer.getByRole("button", { name: "Join stream" }).waitFor();
   console.log(`WebRTC smoke test passed for room ${code}.`);
 } finally {
   await browser.close();

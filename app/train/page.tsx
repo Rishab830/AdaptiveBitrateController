@@ -15,6 +15,7 @@ export default function TrainPage() {
   const [policies, setPolicies] = useState<QTableArtifact[]>([]);
   const [progress, setProgress] = useState<TrainingProgress | null>(null);
   const [error, setError] = useState("");
+  const [policyAction, setPolicyAction] = useState("");
   const worker = useRef<Worker | null>(null);
   const refresh = () => listPolicies().then(setPolicies).catch(() => setPolicies([]));
   useEffect(() => { void refresh(); return () => worker.current?.terminate(); }, []);
@@ -39,11 +40,28 @@ export default function TrainPage() {
   }
 
   async function importPolicy(file: File) {
+    setPolicyAction("import");
     try {
       const policy = JSON.parse(await file.text()) as QTableArtifact;
       if (policy.schemaVersion !== 1 || !policy.qTable || !policy.profile) throw new Error("Unsupported policy file");
       await savePolicy(policy); await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not import policy"); }
+    finally { setPolicyAction(""); }
+  }
+
+  function activate(policy: QTableArtifact) {
+    setPolicyAction(`${policy.id}:activate`); setActivePolicy(policy.id);
+    window.setTimeout(() => setPolicyAction(""), 350);
+  }
+  function exportPolicy(policy: QTableArtifact) {
+    setPolicyAction(`${policy.id}:export`);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(policy)], { type: "application/json" }));
+    const a = document.createElement("a"); a.href = url; a.download = `${policy.profile.name}.qtable.json`; a.click(); URL.revokeObjectURL(url);
+    window.setTimeout(() => setPolicyAction(""), 350);
+  }
+  async function removePolicy(id: string) {
+    setPolicyAction(`${id}:delete`);
+    try { await deletePolicy(id); await refresh(); } finally { setPolicyAction(""); }
   }
 
   return <main><Header /><div className="shell page-grid">
@@ -61,20 +79,18 @@ export default function TrainPage() {
         <label>Latency (ms)<input type="number" value={profile.latency} onChange={(e) => update("latency", Number(e.target.value))} /></label>
         <label>Packet loss<input type="number" step="0.01" min="0" max="0.5" value={profile.loss} onChange={(e) => update("loss", Number(e.target.value))} /></label>
         <label>Seed<input type="number" value={profile.seed} onChange={(e) => update("seed", Number(e.target.value))} /></label>
-        <div className="form-actions"><button className="button primary" onClick={startTraining} disabled={Boolean(progress)}>Train Q-table</button>
-          {progress && <button className="button" onClick={() => { worker.current?.terminate(); setProgress(null); }}>Cancel</button>}</div>
+        <div className="form-actions"><button className="button primary" onClick={startTraining} disabled={Boolean(progress)}>{progress ? "Training…" : "Train Q-table"}</button>
+          {progress && <button className="button" onClick={() => { worker.current?.terminate(); setProgress(null); }}>Cancel training</button>}</div>
         {progress && <div className="progress"><span style={{ width: `${progress.episode / progress.total * 100}%` }} /><b>{Math.round(progress.episode / progress.total * 100)}%</b></div>}
         {error && <p className="error">{error}</p>}
       </div>
     </section>
     <aside>
-      <div className="section-heading"><h2>Saved policies</h2><label className="button small">Import<input hidden type="file" accept="application/json" onChange={(e) => e.target.files?.[0] && void importPolicy(e.target.files[0])} /></label></div>
+      <div className="section-heading"><h2>Saved policies</h2><label className={`button small ${policyAction ? "disabled" : ""}`}>{policyAction === "import" ? "Importing…" : "Import"}<input disabled={Boolean(policyAction)} hidden type="file" accept="application/json" onChange={(e) => e.target.files?.[0] && void importPolicy(e.target.files[0])} /></label></div>
       <div className="policy-list">{policies.length === 0 && <div className="empty">No policies yet. Train one to replace the safe runtime fallback.</div>}
         {policies.map((policy) => <article className="policy" key={policy.id}><small>{policy.profile.rewardMode} · {policy.profile.viewers} viewer{policy.profile.viewers > 1 ? "s" : ""}</small><h3>{policy.profile.name}</h3>
           <div className="policy-stats"><span>Reward <b>{policy.evaluation.averageReward.toFixed(2)}</b></span><span>Freeze <b>{(policy.evaluation.freezeRate * 100).toFixed(1)}%</b></span><span>States <b>{Object.keys(policy.qTable).length}</b></span></div>
-          <div className="row"><button className="button small primary" onClick={() => setActivePolicy(policy.id)}>Activate</button><button className="button small" onClick={() => {
-            const url = URL.createObjectURL(new Blob([JSON.stringify(policy)], { type: "application/json" })); const a = document.createElement("a"); a.href = url; a.download = `${policy.profile.name}.qtable.json`; a.click(); URL.revokeObjectURL(url);
-          }}>Export</button><button className="button small danger" onClick={() => deletePolicy(policy.id).then(refresh)}>Delete</button></div>
+          <div className="row"><button disabled={Boolean(policyAction)} className="button small primary" onClick={() => activate(policy)}>{policyAction === `${policy.id}:activate` ? "Activating…" : "Activate"}</button><button disabled={Boolean(policyAction)} className="button small" onClick={() => exportPolicy(policy)}>{policyAction === `${policy.id}:export` ? "Exporting…" : "Export"}</button><button disabled={Boolean(policyAction)} className="button small danger" onClick={() => void removePolicy(policy.id)}>{policyAction === `${policy.id}:delete` ? "Deleting…" : "Delete"}</button></div>
         </article>)}
       </div>
     </aside>

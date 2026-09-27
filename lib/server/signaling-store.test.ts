@@ -33,4 +33,13 @@ describe("ephemeral signaling rooms", () => {
     expect(new Set(messages.map((message) => message.seq)).size).toBe(12);
     expect(messages.map((message) => message.seq)).toEqual([...messages.map((message) => message.seq)].sort((a, b) => a - b));
   });
+
+  it("keeps an ended room readable long enough to notify viewers", async () => {
+    const host = await createRoom();
+    const viewer = await joinRoom(host.code);
+    await removeParticipant(host.code, "host", host.token);
+    const messages = await readSignals(host.code, viewer.participantId, viewer.token, 0);
+    expect(messages.some((message) => message.payload.type === "source-ended")).toBe(true);
+    await expect(joinRoom(host.code)).rejects.toMatchObject({ status: 410 });
+  });
 });

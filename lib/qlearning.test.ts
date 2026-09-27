@@ -48,4 +48,9 @@ describe("QoE and learning", () => {
     expect(selectAction(policy, state, 2)).toEqual({ levels: [3, 4], qValue: 4.2, fallback: false });
     expect(selectAction(undefined, state, 2).fallback).toBe(true);
   });
+
+  it("probes above Economy after a stable interval without a trained table", () => {
+    const state = { ...discretizeState([telemetry], [0], 12), headroom: 2, delivery: 3, loss: 0, freeze: 0, switchAge: 2 };
+    expect(selectAction(undefined, state, 1, "balanced").levels).toEqual([1]);
+  });
 });

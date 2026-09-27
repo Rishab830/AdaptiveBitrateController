@@ -36,6 +36,11 @@ export async function leaveRoom(session: RoomSession) {
   await fetch(`/api/rooms/${session.code}`, { method: "DELETE", headers: headers(session), keepalive: true });
 }
 
+export function beaconLeaveRoom(session: RoomSession) {
+  const body = new Blob([JSON.stringify({ participantId: session.participantId, token: session.token })], { type: "application/json" });
+  return navigator.sendBeacon(`/api/rooms/${session.code}/leave`, body);
+}
+
 export async function getIceServers(): Promise<RTCIceServer[]> {
   return (await parse<{ iceServers: RTCIceServer[] }>(await fetch("/api/ice-config", { cache: "no-store" }))).iceServers;
 }
