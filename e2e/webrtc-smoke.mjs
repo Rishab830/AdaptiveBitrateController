@@ -27,6 +27,7 @@ try {
   await host.getByRole("button", { name: "Camera" }).click();
   await host.getByText("Source ready").waitFor();
   await host.getByRole("button", { name: "Create room" }).click();
+  await host.getByRole("button", { name: "Creating room…" }).waitFor();
   await host.waitForFunction(() => {
     const value = document.querySelector(".room-card strong")?.textContent ?? "";
     return value.length === 6 && !value.includes("—");

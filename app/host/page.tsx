@@ -46,8 +46,16 @@ export default function HostPage() {
   const syncPeers = () => setPeerRows([...peers.current.values()]);
   async function perform(label: string, action: () => Promise<void>) {
     if (busy) return;
+    const started = performance.now();
     setBusy(label);
-    try { await action(); } finally { setBusy(""); }
+    // Give React a frame to render the pending label before a fast request can
+    // complete, then keep the acknowledgement visible long enough to notice.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try { await action(); } finally {
+      const remaining = Math.max(0, 450 - (performance.now() - started));
+      if (remaining) await new Promise((resolve) => setTimeout(resolve, remaining));
+      setBusy("");
+    }
   }
 
   async function installStream(stream: MediaStream, name: string) {

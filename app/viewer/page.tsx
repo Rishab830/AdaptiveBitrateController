@@ -33,8 +33,14 @@ export default function ViewerPage() {
 
   async function perform(label: string, action: () => Promise<void>) {
     if (busy) return;
+    const started = performance.now();
     setBusy(label);
-    try { await action(); } finally { setBusy(""); }
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try { await action(); } finally {
+      const remaining = Math.max(0, 450 - (performance.now() - started));
+      if (remaining) await new Promise((resolve) => setTimeout(resolve, remaining));
+      setBusy("");
+    }
   }
 
   const makePeer = useCallback(async () => {
