@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:webrtc": "node e2e/webrtc-smoke.mjs"
   },
   "dependencies": {
     "@upstash/redis": "^1.39.0",
@@ -25,6 +26,7 @@
     "eslint": "^9.39.5",
     "eslint-config-next": "^16.3.6",
     "jsdom": "^27.2.0",
+    "playwright-core": "^1.55.0",
     "typescript": "^5.9.3",
     "vitest": "^5.0.2"
   }

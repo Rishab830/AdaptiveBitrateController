@@ -66,4 +66,6 @@ npm test
 npm run build
 ```
 
+With the development server running, `npm run test:webrtc` launches two local Chromium pages with a synthetic camera and verifies room joining, ICE connection, and received video. Set `CHROME_PATH` if Chrome or Edge is installed in a nonstandard location.
+
 See [PLAN.md](./PLAN.md) for the product specification and [REPORT.md](./REPORT.md) for the MDP, reward, and architectural rationale.

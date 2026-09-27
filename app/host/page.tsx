@@ -93,7 +93,14 @@ export default function HostPage() {
     channel.onmessage = (event) => {
       try { const message = JSON.parse(event.data); if (message.type === "telemetry") runtime.remote = message.value; } catch { /* ignore malformed peer data */ }
     };
-    pc.onicecandidate = (event) => { if (event.candidate) void sendSignal(session, viewerId, { type: "ice", candidate: event.candidate.toJSON() }); };
+    pc.onicecandidate = (event) => {
+      if (event.candidate) void sendSignal(session, viewerId, { type: "ice", candidate: event.candidate.toJSON() })
+        .catch(() => setError("Could not deliver an ICE candidate. Check the signaling service."));
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === "failed") setError("A network path could not be established for a viewer. Configure TURN for restrictive networks.");
+      syncPeers();
+    };
     pc.onconnectionstatechange = () => { setStatus(`Viewer ${viewerId.slice(-4)}: ${pc.connectionState}`); syncPeers(); };
     const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
     await sendSignal(session, viewerId, { type: "offer", sdp: offer }); syncPeers();
@@ -179,7 +186,7 @@ export default function HostPage() {
       <div className="panel"><div className="section-heading"><h2>Connected clients</h2><span>{peerRows.length}/2</span></div>
         {peerRows.length === 0 && <div className="empty">Share the room code. Client metrics will appear here.</div>}
         {peerRows.map((peer) => <article className="client-card" key={peer.id}><div className="row spread"><b>Client {peer.id.slice(-4).toUpperCase()}</b><span className={`status-dot ${peer.pc.connectionState}`} /> </div>
-          <div className="metric-grid"><Metric label="Quality" value={QUALITY_LEVELS[peer.level].name} /><Metric label="Outbound" value={formatBitrate(peer.local?.outboundBitrate ?? 0)} /><Metric label="RTT" value={`${Math.round(peer.local?.rtt ?? 0)} ms`} /><Metric label="Loss" value={`${((peer.remote?.packetLoss ?? peer.local?.packetLoss ?? 0) * 100).toFixed(1)}%`} /></div>
+          <div className="metric-grid"><Metric label="Quality" value={QUALITY_LEVELS[peer.level].name} /><Metric label="ICE state" value={peer.pc.iceConnectionState} /><Metric label="Outbound" value={formatBitrate(peer.local?.outboundBitrate ?? 0)} /><Metric label="RTT" value={`${Math.round(peer.local?.rtt ?? 0)} ms`} /><Metric label="Loss" value={`${((peer.remote?.packetLoss ?? peer.local?.packetLoss ?? 0) * 100).toFixed(1)}%`} /></div>
         </article>)}
       </div>
       <div className="decision panel"><small>RL DECISION</small><p>{decision}</p></div>

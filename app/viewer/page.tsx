@@ -35,6 +35,10 @@ export default function ViewerPage() {
       event.channel.onmessage = (message) => { try { const data = JSON.parse(message.data); if (data.type === "quality") { setQuality(data.level); setFallback(data.fallback); } } catch { /* ignore */ } };
     };
     connection.onconnectionstatechange = () => setStatus(connection.connectionState === "connected" ? "Live" : connection.connectionState);
+    connection.oniceconnectionstatechange = () => {
+      if (connection.iceConnectionState === "failed") setError("No peer-to-peer path could be established. The host should configure a TURN relay for this network.");
+      else if (connection.iceConnectionState !== "new") setStatus(connection.iceConnectionState === "connected" || connection.iceConnectionState === "completed" ? "Live" : `ICE ${connection.iceConnectionState}`);
+    };
     if (session) connection.onicecandidate = (event) => { if (event.candidate) void sendSignal(session, "host", { type: "ice", candidate: event.candidate.toJSON() }); };
     return connection;
   }, [session]);
@@ -51,7 +55,10 @@ export default function ViewerPage() {
     try {
       if (signal.payload.type === "offer") {
         const connection = await makePeer();
-        connection.onicecandidate = (event) => { if (event.candidate) void sendSignal(session, "host", { type: "ice", candidate: event.candidate.toJSON() }); };
+        connection.onicecandidate = (event) => {
+          if (event.candidate) void sendSignal(session, "host", { type: "ice", candidate: event.candidate.toJSON() })
+            .catch(() => setError("Could not deliver an ICE candidate. Check the signaling service."));
+        };
         await connection.setRemoteDescription(signal.payload.sdp);
         for (const candidate of pendingIce.current.splice(0)) await connection.addIceCandidate(candidate);
         const answer = await connection.createAnswer(); await connection.setLocalDescription(answer);

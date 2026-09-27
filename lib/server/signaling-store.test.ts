@@ -20,4 +20,17 @@ describe("ephemeral signaling rooms", () => {
     await removeParticipant(host.code, first.participantId, first.token);
     await expect(joinRoom(host.code)).resolves.toBeTruthy();
   });
+
+  it("keeps concurrent trickle ICE signals ordered and complete", async () => {
+    const host = await createRoom();
+    const viewer = await joinRoom(host.code);
+    await Promise.all(Array.from({ length: 12 }, (_, index) => appendSignal(
+      host.code, "host", host.token, viewer.participantId,
+      { type: "ice", candidate: { candidate: `candidate-${index}` } },
+    )));
+    const messages = await readSignals(host.code, viewer.participantId, viewer.token, 0);
+    expect(messages).toHaveLength(12);
+    expect(new Set(messages.map((message) => message.seq)).size).toBe(12);
+    expect(messages.map((message) => message.seq)).toEqual([...messages.map((message) => message.seq)].sort((a, b) => a - b));
+  });
 });

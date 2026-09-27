@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { pollSignals } from "@/lib/signaling-client";
 import type { RoomSession, SignalEnvelope } from "@/lib/types";
 
-export function useSignalPoll(session: RoomSession | null, onSignal: (signal: SignalEnvelope) => void) {
+export function useSignalPoll(session: RoomSession | null, onSignal: (signal: SignalEnvelope) => void | Promise<void>) {
   const handler = useRef(onSignal);
   useEffect(() => { handler.current = onSignal; }, [onSignal]);
   useEffect(() => {
@@ -15,8 +15,12 @@ export function useSignalPoll(session: RoomSession | null, onSignal: (signal: Si
       while (!cancelled) {
         try {
           const response = await pollSignals(session, cursor);
-          cursor = response.cursor;
-          response.signals.forEach((signal) => handler.current(signal));
+          // SDP and ICE messages are order-dependent. Await each handler so a
+          // candidate can never overtake the offer/answer that makes it valid.
+          for (const signal of response.signals) {
+            await handler.current(signal);
+            cursor = signal.seq;
+          }
         } catch (error) {
           if (!cancelled) console.warn("Signal polling failed", error);
         }
