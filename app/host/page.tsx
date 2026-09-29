@@ -28,7 +28,7 @@ interface DecisionRecord {
 }
 
 const HEADROOM_LABELS = ["<0.75×", "0.75–1×", "1–1.5×", "1.5–2.5×", "≥2.5×"];
-const DELIVERY_LABELS = ["<60%", "60–85%", "85–100%", "100–125%", "≥125%"];
+const DELIVERY_LABELS = ["<50%", "50–75%", "75–90%", "90–110%", "≥110%"];
 const RTT_LABELS = ["<75 ms", "75–150 ms", "150–300 ms", "≥300 ms"];
 const LOSS_LABELS = ["<1%", "1–3%", "3–8%", "≥8%"];
 const JITTER_LABELS = ["<30 ms", "30–75 ms", "≥75 ms"];

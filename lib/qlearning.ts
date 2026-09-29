@@ -12,28 +12,28 @@ export function discretizeState(
 ): DiscreteState {
   const target = QUALITY_LEVELS[current[0] ?? 0].videoBitrate;
   const capacityFor = (peer: PeerTelemetry, index: number) => {
-    const observed = peer.outboundBitrate || QUALITY_LEVELS[current[index] ?? 0].videoBitrate;
+    const neutral = QUALITY_LEVELS[current[index] ?? 0].videoBitrate;
     const estimates = [peer.availableOutgoingBitrate, peer.networkDownlink ? peer.networkDownlink * 1_000_000 : undefined]
       .filter((value): value is number => Boolean(value && value > 0));
-    return estimates.length ? Math.min(...estimates) : observed;
+    return estimates.length ? Math.min(...estimates) : neutral;
   };
   const headrooms = peers.map((peer, index) => {
     const peerTarget = QUALITY_LEVELS[current[index] ?? current[0] ?? 0].videoBitrate;
     return capacityFor(peer, index) / peerTarget;
   });
-  const deliveries = peers.map((peer, index) => {
-    const peerTarget = QUALITY_LEVELS[current[index] ?? current[0] ?? 0].videoBitrate;
-    return (peer.inboundBitrate || peer.outboundBitrate || 0) / peerTarget;
+  const deliveries = peers.map((peer) => {
+    if (!peer.outboundBitrate || !peer.inboundBitrate) return 1;
+    return peer.inboundBitrate / peer.outboundBitrate;
   });
   const totalAvailable = peers.reduce((sum, peer, index) => sum + capacityFor(peer, index), 0);
   const totalTarget = current.reduce((sum, level) => sum + QUALITY_LEVELS[level].videoBitrate, 0) || target;
   return {
     headroom: bins(headrooms.length ? Math.min(...headrooms) : 1, [0.75, 1, 1.5, 2.5]),
-    delivery: bins(deliveries.length ? Math.min(...deliveries) : 0, [0.6, 0.85, 1, 1.25]),
+    delivery: bins(deliveries.length ? Math.min(...deliveries) : 1, [0.5, 0.75, 0.9, 1.1]),
     rtt: bins(Math.max(...peers.map((peer) => peer.rtt), 0), [75, 150, 300]),
     loss: bins(Math.max(...peers.map((peer) => peer.packetLoss), 0), [0.01, 0.03, 0.08]),
     jitter: bins(Math.max(...peers.map((peer) => peer.jitter), 0), [0.03, 0.075]),
-    freeze: peers.some((peer) => peer.freezeCount > 0 || peer.framesDropped > 5) ? 1 : 0,
+    freeze: peers.some((peer) => (peer.impairmentSeverity ?? 0) >= 0.25) ? 1 : 0,
     currentA: current[0] ?? 0,
     currentB: current[1] ?? 0,
     switchAge: bins(secondsSinceSwitch, [4, 10]),
@@ -55,17 +55,19 @@ export function decodeAction(action: number, viewers: 1 | 2): number[] {
 }
 
 export function rewardFor(
-  levels: number[], previous: number[], capacity: number, froze: boolean, mode: PolicyProfile["rewardMode"],
+  levels: number[], previous: number[], capacity: number, impairment: boolean | number, mode: PolicyProfile["rewardMode"],
 ) {
   const w = REWARD_WEIGHTS[mode];
   const targets = levels.map((level) => QUALITY_LEVELS[level].videoBitrate);
   const requested = targets.reduce((a, b) => a + b, 0);
   const quality = levels.reduce((sum, level) => sum + level / (QUALITY_LEVELS.length - 1), 0) / levels.length;
   const switches = levels.reduce((sum, level, index) => sum + Math.abs(level - (previous[index] ?? 0)) / 4, 0) / levels.length;
-  const sustainable = Math.min(1, capacity / Math.max(requested, 1));
   const underuse = Math.max(0, capacity - requested) / Math.max(capacity, 1);
-  const overload = Math.max(0, requested - capacity) / Math.max(capacity, 1);
-  return w.quality * quality - w.freeze * (froze ? 1 : overload) - w.switching * switches - w.underuse * underuse * sustainable;
+  const overloadRatio = Math.max(0, requested - capacity) / Math.max(capacity, 1);
+  const overloadSeverity = Math.min(1, Math.max(0, overloadRatio - 0.05) / 0.45);
+  const measuredSeverity = typeof impairment === "boolean" ? (impairment ? 1 : 0) : Math.min(1, Math.max(0, impairment));
+  const impairmentPenalty = w.freeze * Math.max(measuredSeverity, overloadSeverity);
+  return w.quality * quality - impairmentPenalty - w.switching * switches - w.underuse * underuse;
 }
 
 function mulberry32(seed: number) {
@@ -102,9 +104,12 @@ export function trainPolicy(profile: PolicyProfile, onProgress?: (episode: numbe
       rtt: profile.latency * (0.7 + random() * 0.6),
       packetLoss: Math.max(0, profile.loss + (random() - 0.5) * 0.02),
       jitter: profile.latency / 3000 * (0.5 + random()),
-      framesDropped: deliveryRatio < 0.8 ? 8 : 0,
+      framesDropped: deliveryRatio < 0.8 ? Math.round((1 - deliveryRatio) * 30) : 0,
       framesDecoded: 60,
-      freezeCount: deliveryRatio < 0.65 ? 1 : 0,
+      frameDropRate: deliveryRatio < 0.8 ? Math.min(0.4, 1 - deliveryRatio) : 0,
+      freezeCount: deliveryRatio < 0.55 ? 1 : 0,
+      freezeDuration: deliveryRatio < 0.55 ? (0.55 - deliveryRatio) * 3 : 0,
+      impairmentSeverity: Math.min(1, Math.max(0, (0.85 - deliveryRatio) / 0.5) + profile.loss * 2),
       jitterBufferDelay: profile.latency / 1000,
     };
     const state = discretizeState(Array(profile.viewers).fill(synthetic), current, random() * 14);
@@ -114,9 +119,10 @@ export function trainPolicy(profile: PolicyProfile, onProgress?: (episode: numbe
     const action = random() < epsilon ? Math.floor(random() * actionCount) : maxIndex(qTable[key], random);
     const next = decodeAction(action, profile.viewers);
     const requested = next.reduce((sum, level) => sum + QUALITY_LEVELS[level].videoBitrate, 0);
-    const froze = requested > bandwidth * (0.95 - profile.loss);
-    const reward = rewardFor(next, current, bandwidth, froze, profile.rewardMode);
-    const nextSynthetic = { ...synthetic, freezeCount: froze ? 1 : 0, availableOutgoingBitrate: bandwidth / profile.viewers };
+    const overloadRatio = Math.max(0, requested - bandwidth) / Math.max(bandwidth, 1);
+    const impairment = Math.min(1, Math.max(0, overloadRatio - 0.03) / 0.5 + profile.loss * 2);
+    const reward = rewardFor(next, current, bandwidth, impairment, profile.rewardMode);
+    const nextSynthetic = { ...synthetic, freezeCount: impairment >= 0.5 ? 1 : 0, impairmentSeverity: impairment, availableOutgoingBitrate: bandwidth / profile.viewers };
     const nextKey = stateKey(discretizeState(Array(profile.viewers).fill(nextSynthetic), next, 2));
     qTable[nextKey] ??= Array(actionCount).fill(0);
     qTable[key][action] += 0.1 * (reward + 0.95 * Math.max(...qTable[nextKey]) - qTable[key][action]);
@@ -127,7 +133,7 @@ export function trainPolicy(profile: PolicyProfile, onProgress?: (episode: numbe
 
   const evaluation = evaluatePolicy(profile, qTable);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     profile,
@@ -151,16 +157,20 @@ export function evaluatePolicy(profile: PolicyProfile, qTable: Record<string, nu
     const synthetic: PeerTelemetry = {
       timestamp: step, outboundBitrate: currentTarget / profile.viewers * ratio, inboundBitrate: currentTarget / profile.viewers * ratio,
       availableOutgoingBitrate: bandwidth / profile.viewers, rtt: profile.latency * (0.8 + random() * 0.8), packetLoss: Math.max(0, profile.loss + (random() - 0.5) * 0.03),
-      jitter: profile.latency / 2500 * (0.5 + random()), framesDropped: ratio < 0.8 ? 8 : 0, framesDecoded: 60,
-      freezeCount: ratio < 0.65 ? 1 : 0, jitterBufferDelay: profile.latency / 1000,
+      jitter: profile.latency / 2500 * (0.5 + random()), framesDropped: ratio < 0.8 ? Math.round((1 - ratio) * 30) : 0, framesDecoded: 60,
+      frameDropRate: ratio < 0.8 ? Math.min(0.4, 1 - ratio) : 0, freezeCount: ratio < 0.55 ? 1 : 0,
+      freezeDuration: ratio < 0.55 ? (0.55 - ratio) * 3 : 0,
+      impairmentSeverity: Math.min(1, Math.max(0, (0.85 - ratio) / 0.5) + profile.loss * 2), jitterBufferDelay: profile.latency / 1000,
     };
     const state = discretizeState(Array(profile.viewers).fill(synthetic), current, step % 8);
     const values = qTable[stateKey(state)];
     const action = values ? values.indexOf(Math.max(...values)) : encodeAction(Math.max(0, Math.min(4, state.headroom + state.currentA - 2)), Math.max(0, Math.min(4, state.headroom + state.currentB - 2)), profile.viewers);
     const next = decodeAction(action, profile.viewers);
     const requested = next.reduce((sum, level) => sum + QUALITY_LEVELS[level].videoBitrate, 0);
-    const froze = requested > bandwidth * (0.95 - profile.loss);
-    rewardTotal += rewardFor(next, current, bandwidth, froze, profile.rewardMode);
+    const overloadRatio = Math.max(0, requested - bandwidth) / Math.max(bandwidth, 1);
+    const impairment = Math.min(1, Math.max(0, overloadRatio - 0.03) / 0.5 + profile.loss * 2);
+    const froze = impairment >= 0.5;
+    rewardTotal += rewardFor(next, current, bandwidth, impairment, profile.rewardMode);
     switches += next.some((level, index) => level !== current[index]) ? 1 : 0;
     freezes += froze ? 1 : 0;
     levelTotal += next.reduce((a, b) => a + b, 0) / next.length;
@@ -172,7 +182,8 @@ export function evaluatePolicy(profile: PolicyProfile, qTable: Record<string, nu
 
 export function selectAction(policy: QTableArtifact | undefined, state: DiscreteState, viewers: 1 | 2, mode: PolicyProfile["rewardMode"] = "balanced") {
   const values = policy?.qTable[stateKey(state)];
-  if (values?.length) {
+  const learned = values?.some((value) => Math.abs(value) > 1e-7);
+  if (values?.length && learned) {
     const action = values.indexOf(Math.max(...values));
     return { levels: decodeAction(action, viewers), qValue: values[action], fallback: false };
   }

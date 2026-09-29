@@ -9,9 +9,9 @@ export const QUALITY_LEVELS: QualityLevel[] = [
 ];
 
 export const REWARD_WEIGHTS: Record<RewardMode, { quality: number; freeze: number; switching: number; underuse: number }> = {
-  balanced: { quality: 1, freeze: 4, switching: 0.5, underuse: 0.5 },
-  quality: { quality: 1.4, freeze: 2.5, switching: 0.25, underuse: 0.8 },
-  "stall-avoidant": { quality: 0.8, freeze: 6, switching: 0.5, underuse: 0.25 },
+  balanced: { quality: 1.45, freeze: 3.5, switching: 0.35, underuse: 0.65 },
+  quality: { quality: 1.9, freeze: 2.8, switching: 0.2, underuse: 0.85 },
+  "stall-avoidant": { quality: 1.1, freeze: 4.75, switching: 0.4, underuse: 0.35 },
 };
 
 export function formatBitrate(value: number) {

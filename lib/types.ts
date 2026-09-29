@@ -20,7 +20,10 @@ export interface PeerTelemetry {
   jitter: number;
   framesDropped: number;
   framesDecoded: number;
+  frameDropRate?: number;
   freezeCount: number;
+  freezeDuration?: number;
+  impairmentSeverity?: number;
   jitterBufferDelay: number;
   networkType?: string;
   networkDownlink?: number;
@@ -64,7 +67,7 @@ export interface EvaluationSummary {
 }
 
 export interface QTableArtifact {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   createdAt: string;
   profile: PolicyProfile;

@@ -43,7 +43,7 @@ export default function TrainPage() {
     setPolicyAction("import");
     try {
       const policy = JSON.parse(await file.text()) as QTableArtifact;
-      if (policy.schemaVersion !== 1 || !policy.qTable || !policy.profile) throw new Error("Unsupported policy file");
+      if (policy.schemaVersion !== 2 || !policy.qTable || !policy.profile) throw new Error("Unsupported or outdated policy file");
       await savePolicy(policy); await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not import policy"); }
     finally { setPolicyAction(""); }
@@ -87,6 +87,7 @@ export default function TrainPage() {
     </section>
     <aside>
       <div className="section-heading"><h2>Saved policies</h2><label className={`button small ${policyAction ? "disabled" : ""}`}>{policyAction === "import" ? "Importing…" : "Import"}<input disabled={Boolean(policyAction)} hidden type="file" accept="application/json" onChange={(e) => e.target.files?.[0] && void importPolicy(e.target.files[0])} /></label></div>
+      <p className="mode-help">Reward model v2 favors sustainable quality and tolerates minor frame drops. Retrain policies created before this update.</p>
       <div className="policy-list">{policies.length === 0 && <div className="empty">No policies yet. Train one to replace the safe runtime fallback.</div>}
         {policies.map((policy) => <article className="policy" key={policy.id}><small>{policy.profile.rewardMode} · {policy.profile.viewers} viewer{policy.profile.viewers > 1 ? "s" : ""}</small><h3>{policy.profile.name}</h3>
           <div className="policy-stats"><span>Reward <b>{policy.evaluation.averageReward.toFixed(2)}</b></span><span>Freeze <b>{(policy.evaluation.freezeRate * 100).toFixed(1)}%</b></span><span>States <b>{Object.keys(policy.qTable).length}</b></span></div>

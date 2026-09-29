@@ -20,7 +20,7 @@ The reward is:
 
 `quality reward - freeze/overload penalty - switching penalty - underutilization penalty`
 
-The switching term discourages oscillation and large jumps. The quality and underutilization terms discourage remaining at a low level when the path can sustain more. Three weight sets expose Balanced, Quality, and Stall Avoidant objectives.
+The switching term discourages oscillation and large jumps. The quality and underutilization terms discourage remaining at a low level when the path can sustain more. Impairment is proportional rather than binary: a few isolated dropped frames are tolerated, while concentrated frame loss, long freezes, and material capacity overload receive progressively larger penalties. Three weight sets expose Balanced, Quality, and Stall Avoidant objectives.
 
 ## Learning and deployment
 

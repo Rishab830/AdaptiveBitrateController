@@ -47,6 +47,13 @@ try {
   await host.locator(".decision-table tbody tr").first().waitFor({ timeout: 10_000 });
   const decisionText = await host.locator(".decision-table tbody tr").first().textContent();
   if (!decisionText?.includes("headroom") || !decisionText.includes("Economy")) throw new Error("Adaptation history did not expose state and action details.");
+  try {
+    await viewer.locator(".quality-badge").filter({ hasText: /Low|Medium|High|Ultra/ }).waitFor({ timeout: 18_000 });
+  } catch (error) {
+    console.error("Latest quality:", await viewer.locator(".quality-badge").textContent());
+    console.error("Latest decisions:", await host.locator(".decision-table tbody").textContent());
+    throw error;
+  }
 
   await secondViewer.goto(`${baseURL}/viewer`);
   await secondViewer.getByPlaceholder("ABC234").fill(code);

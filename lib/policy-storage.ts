@@ -27,7 +27,9 @@ export async function listPolicies(): Promise<QTableArtifact[]> {
   const db = await database();
   return new Promise((resolve, reject) => {
     const request = db.transaction(STORE).objectStore(STORE).getAll();
-    request.onsuccess = () => resolve(request.result.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    request.onsuccess = () => resolve(request.result
+      .filter((policy: { schemaVersion?: number }) => policy.schemaVersion === 2)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
     request.onerror = () => reject(request.error);
   });
 }

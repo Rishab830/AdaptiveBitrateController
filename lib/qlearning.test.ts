@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { decodeAction, discretizeState, encodeAction, rewardFor, selectAction, stateKey, trainPolicy } from "./qlearning";
 import type { PeerTelemetry, PolicyProfile, QTableArtifact } from "./types";
+import { computeImpairmentSeverity } from "./webrtc";
 
 beforeAll(() => {
   if (!globalThis.crypto.randomUUID) Object.defineProperty(globalThis.crypto, "randomUUID", { value: () => "test-id" });
@@ -19,7 +20,7 @@ const profile: PolicyProfile = {
 describe("state and action representation", () => {
   it("discretizes measured path statistics deterministically", () => {
     const state = discretizeState([telemetry], [2], 6);
-    expect(state).toMatchObject({ headroom: 3, delivery: 1, rtt: 1, loss: 1, jitter: 1, freeze: 0, currentA: 2, switchAge: 1 });
+    expect(state).toMatchObject({ headroom: 3, delivery: 3, rtt: 1, loss: 1, jitter: 1, freeze: 0, currentA: 2, switchAge: 1 });
     expect(stateKey(state).split("|")).toHaveLength(10);
   });
 
@@ -33,12 +34,25 @@ describe("QoE and learning", () => {
     expect(rewardFor([4], [2], 500_000, true, "balanced")).toBeLessThan(rewardFor([1], [1], 1_000_000, false, "balanced"));
   });
 
+  it("rewards higher sustainable quality and scales impairment penalties", () => {
+    expect(rewardFor([3], [3], 5_000_000, 0, "balanced")).toBeGreaterThan(rewardFor([1], [1], 5_000_000, 0, "balanced"));
+    expect(rewardFor([2], [2], 5_000_000, 0.05, "balanced")).toBeGreaterThan(rewardFor([2], [2], 5_000_000, 0.8, "balanced"));
+  });
+
+  it("tolerates isolated drops but treats concentrated drops and freezes as impairment", () => {
+    expect(computeImpairmentSeverity(1, 59, 0, 0, 0.05)).toBe(0);
+    expect(computeImpairmentSeverity(12, 48, 0, 0, 0.05)).toBeGreaterThan(0.25);
+    expect(computeImpairmentSeverity(0, 60, 1.5, 1, 0.05)).toBeGreaterThan(0.5);
+  });
+
   it("produces reproducible tables and metrics for a fixed seed", () => {
     const first = trainPolicy(profile);
     const second = trainPolicy(profile);
     expect(first.qTable).toEqual(second.qTable);
     expect(first.evaluation).toEqual(second.evaluation);
+    expect(first.schemaVersion).toBe(2);
     expect(Object.keys(first.qTable).length).toBeGreaterThan(100);
+    expect(first.evaluation.averageLevel).toBeGreaterThan(0.5);
   });
 
   it("uses table values for known states and flags unseen-state fallback", () => {
@@ -52,5 +66,13 @@ describe("QoE and learning", () => {
   it("probes above Economy after a stable interval without a trained table", () => {
     const state = { ...discretizeState([telemetry], [0], 12), headroom: 2, delivery: 3, loss: 0, freeze: 0, switchAge: 2 };
     expect(selectAction(undefined, state, 1, "balanced").levels).toEqual([1]);
+  });
+
+  it("does not treat an unlearned all-zero row as an Economy decision", () => {
+    const state = { ...discretizeState([telemetry], [0], 12), delivery: 3, loss: 0, switchAge: 2 };
+    const policy = { qTable: { [stateKey(state)]: Array(5).fill(0) } } as QTableArtifact;
+    const decision = selectAction(policy, state, 1, "quality");
+    expect(decision.fallback).toBe(true);
+    expect(decision.levels[0]).toBeGreaterThan(0);
   });
 });

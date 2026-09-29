@@ -46,6 +46,8 @@ Vercel stores and forwards SDP/ICE signaling metadata only. WebRTC media does no
 
 The Server dashboard's **Adaptation mode** control switches between Balanced RL, Quality RL, Stall Avoidant RL, and Manual quality. A compatible trained table is preferred. When one is unavailable, the selected safety controller probes upward after stable delivery instead of remaining permanently at Economy; Manual quality applies the selected level directly.
 
+Policies use reward-model schema v2. Older saved or exported tables are intentionally ignored because they used cumulative frame-drop counters and an overly binary freeze penalty; retrain them from the Policies page.
+
 Ending a room displays a termination dialog to every viewer. Viewer tabs send a leave beacon during refresh/close, while heartbeat expiry releases a slot if the browser cannot deliver that beacon.
 
 Local-file capture and screen sharing are capability-dependent. The UI reports unsupported capture rather than uploading or transcoding the file. Camera/microphone sources generally have the broadest mobile support.
