@@ -8,12 +8,42 @@ import { QUALITY_LEVELS, formatBitrate } from "@/lib/levels";
 import { getPolicyForMode } from "@/lib/policy-storage";
 import { discretizeState, selectAction, stateKey } from "@/lib/qlearning";
 import { createRoom, getIceServers, leaveRoom, sendSignal } from "@/lib/signaling-client";
-import type { PeerTelemetry, RewardMode, RoomSession, SignalEnvelope } from "@/lib/types";
+import type { DiscreteState, PeerTelemetry, RewardMode, RoomSession, SignalEnvelope } from "@/lib/types";
 import { applyQuality, collectTelemetry, supportedLevelIds } from "@/lib/webrtc";
 
 interface PeerRuntime {
   id: string; pc: RTCPeerConnection; channel?: RTCDataChannel; level: number; lastSwitch: number;
   local?: PeerTelemetry; remote?: PeerTelemetry; sample?: { at: number; bytes: number }; pendingIce: RTCIceCandidateInit[];
+}
+
+interface DecisionRecord {
+  id: number;
+  at: Date;
+  controller: string;
+  source: "Q-table" | "Safety" | "Manual";
+  state: DiscreteState;
+  qValue?: number;
+  transitions: { client: string; from: number; to: number }[];
+  reason: string;
+}
+
+const HEADROOM_LABELS = ["<0.75×", "0.75–1×", "1–1.5×", "1.5–2.5×", "≥2.5×"];
+const DELIVERY_LABELS = ["<60%", "60–85%", "85–100%", "100–125%", "≥125%"];
+const RTT_LABELS = ["<75 ms", "75–150 ms", "150–300 ms", "≥300 ms"];
+const LOSS_LABELS = ["<1%", "1–3%", "3–8%", "≥8%"];
+const JITTER_LABELS = ["<30 ms", "30–75 ms", "≥75 ms"];
+const SWITCH_AGE_LABELS = ["<4 s", "4–10 s", "≥10 s"];
+
+function explainDecision(state: DiscreteState, from: number[], to: number[], source: DecisionRecord["source"], capped: boolean) {
+  let reason: string;
+  if (source === "Manual") reason = "Applied the host's manual quality override.";
+  else if (source === "Q-table") reason = "Matched this state in the trained table and chose the action with the highest Q-value.";
+  else if (state.freeze) reason = "Recent freezing or frame drops triggered a safety downgrade.";
+  else if (state.headroom === 0 || state.delivery <= 1) reason = "Delivery is below the current target, so quality was reduced or held.";
+  else if (to.some((level, index) => level > from[index])) reason = "Stable delivery and sufficient headroom allowed an upward probe.";
+  else if (to.some((level, index) => level < from[index])) reason = "Network headroom fell, so the controller reduced quality.";
+  else reason = "Held the current levels to avoid an unnecessary quality switch.";
+  return capped ? `${reason} The source's resolution or frame rate capped at least one action.` : reason;
 }
 
 const emptyMetric: PeerTelemetry = { timestamp: 0, outboundBitrate: 0, inboundBitrate: 0, rtt: 0, packetLoss: 0, jitter: 0, framesDropped: 0, framesDecoded: 0, freezeCount: 0, jitterBufferDelay: 0 };
@@ -27,7 +57,7 @@ export default function HostPage() {
   const [sourceName, setSourceName] = useState("No source selected");
   const [status, setStatus] = useState("Choose a source to begin");
   const [error, setError] = useState("");
-  const [decision, setDecision] = useState("Waiting for viewers");
+  const [decisions, setDecisions] = useState<DecisionRecord[]>([]);
   const [persistent, setPersistent] = useState(true);
   const [adaptationMode, setAdaptationMode] = useState<RewardMode | "manual">("balanced");
   const [manualLevel, setManualLevel] = useState(2);
@@ -175,15 +205,24 @@ export default function HostPage() {
         ? { levels: Array(viewerCount).fill(manualLevel) as number[], qValue: 0, fallback: false }
         : selectAction(policy, state, viewerCount, adaptationMode);
       const allowed = supportedLevelIds(source.current!);
+      const appliedLevels = active.map((_, index) => Math.max(...allowed.filter((level) => level <= (selected.levels[index] ?? 0)), allowed[0]));
+      const capped = appliedLevels.some((level, index) => level !== selected.levels[index]);
       await Promise.all(active.map(async (peer, index) => {
-        const desired = Math.max(...allowed.filter((level) => level <= (selected.levels[index] ?? 0)), allowed[0]);
+        const desired = appliedLevels[index];
         if (desired !== peer.level) peer.lastSwitch = Date.now();
         peer.level = desired;
         await applyQuality(peer.pc, desired, source.current!.getVideoTracks()[0]?.getSettings().height);
         if (peer.channel?.readyState === "open") peer.channel.send(JSON.stringify({ type: "quality", level: desired, fallback: selected.fallback, mode: adaptationMode }));
       }));
       const controller = adaptationMode === "manual" ? "Manual override" : selected.fallback ? `${adaptationMode} safety controller` : policy?.profile.name;
-      setDecision(`${controller}: ${active.map((peer) => QUALITY_LEVELS[peer.level].name).join(" / ")} · state ${stateKey(state)}`);
+      const sourceType: DecisionRecord["source"] = adaptationMode === "manual" ? "Manual" : selected.fallback ? "Safety" : "Q-table";
+      const record: DecisionRecord = {
+        id: Date.now(), at: new Date(), controller: controller ?? adaptationMode, source: sourceType, state,
+        qValue: sourceType === "Q-table" ? selected.qValue : undefined,
+        transitions: active.map((peer, index) => ({ client: peer.id.slice(-4).toUpperCase(), from: current[index], to: appliedLevels[index] })),
+        reason: explainDecision(state, current, appliedLevels, sourceType, capped),
+      };
+      setDecisions((history) => [record, ...history].slice(0, 12));
       syncPeers();
     }, 2000);
     return () => clearInterval(timer);
@@ -216,8 +255,14 @@ export default function HostPage() {
         {adaptationMode === "manual" && <label>Quality level<select value={manualLevel} onChange={(event) => setManualLevel(Number(event.target.value))}>{QUALITY_LEVELS.map((level) => <option key={level.id} value={level.id}>{level.name} — {formatBitrate(level.videoBitrate)}</option>)}</select></label>}
         {adaptationMode !== "manual" && <p className="mode-help">A matching trained Q-table is used when available. Otherwise the safety controller probes upward after a stable interval instead of remaining at Economy.</p>}
       </div>
-      <div className="decision panel"><small>RL DECISION</small><p>{decision}</p></div>
       <a className="text-link" href="/train">Train or activate another policy →</a>
     </aside>
+      <section className="decision panel decision-wide"><div className="section-heading"><div><small>RL DECISIONS</small><h2>Adaptation history</h2></div><span>{decisions.length ? "Newest first" : "Waiting"}</span></div>
+        {decisions.length === 0 ? <div className="empty">A decision is recorded every two seconds after a viewer connects.</div> : <div className="decision-table-wrap"><table className="decision-table"><thead><tr><th>Time</th><th>Controller</th><th>Network state</th><th>Action</th><th>Q-value</th><th>Reason</th></tr></thead>
+          <tbody>{decisions.map((entry) => <tr key={entry.id}><td>{entry.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td><td><b>{entry.source}</b><span>{entry.controller}</span></td>
+            <td><span>Path headroom {HEADROOM_LABELS[entry.state.headroom]}</span><span>Aggregate headroom {HEADROOM_LABELS[entry.state.aggregateHeadroom]}</span><span>Delivery {DELIVERY_LABELS[entry.state.delivery]}</span><span>RTT {RTT_LABELS[entry.state.rtt]} · Loss {LOSS_LABELS[entry.state.loss]}</span><span>Jitter {JITTER_LABELS[entry.state.jitter]} · Last switch {SWITCH_AGE_LABELS[entry.state.switchAge]}</span><span>Recent freeze {entry.state.freeze ? "yes" : "no"}</span><code>State key: {stateKey(entry.state)}</code></td>
+            <td>{entry.transitions.map((transition) => <span key={transition.client}>C-{transition.client}: {QUALITY_LEVELS[transition.from].name} → <b>{QUALITY_LEVELS[transition.to].name}</b></span>)}</td>
+            <td>{entry.qValue === undefined ? "—" : entry.qValue.toFixed(3)}</td><td>{entry.reason}</td></tr>)}</tbody></table></div>}
+      </section>
   </div></main>;
 }

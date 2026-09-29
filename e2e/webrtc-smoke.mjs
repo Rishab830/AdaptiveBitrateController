@@ -44,6 +44,9 @@ try {
     const video = document.querySelector("video");
     return video?.srcObject instanceof MediaStream && video.srcObject.getVideoTracks().length > 0 && video.readyState >= 2;
   }, undefined, { timeout: 20_000 });
+  await host.locator(".decision-table tbody tr").first().waitFor({ timeout: 10_000 });
+  const decisionText = await host.locator(".decision-table tbody tr").first().textContent();
+  if (!decisionText?.includes("headroom") || !decisionText.includes("Economy")) throw new Error("Adaptation history did not expose state and action details.");
 
   await secondViewer.goto(`${baseURL}/viewer`);
   await secondViewer.getByPlaceholder("ABC234").fill(code);
