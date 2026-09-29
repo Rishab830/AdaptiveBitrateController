@@ -5,7 +5,10 @@ import { Header } from "@/components/header";
 import { Metric } from "@/components/metric";
 import { useSignalPoll } from "@/hooks/use-signal-poll";
 import { QUALITY_LEVELS, formatBitrate } from "@/lib/levels";
-import { getPolicyForMode } from "@/lib/policy-storage";
+import { getMlpPolicyForMode, getPolicyForMode } from "@/lib/policy-storage";
+import { decidePpo } from "@/lib/policy/ppo";
+import { decideQTable } from "@/lib/policy/qtable";
+import type { ViewerRaw } from "@/lib/policy/spec";
 import { discretizeState, selectAction, stateKey } from "@/lib/qlearning";
 import { createRoom, getIceServers, leaveRoom, sendSignal } from "@/lib/signaling-client";
 import type { DiscreteState, PeerTelemetry, RewardMode, RoomSession, SignalEnvelope } from "@/lib/types";
@@ -14,13 +17,14 @@ import { applyQuality, collectTelemetry, supportedLevelIds } from "@/lib/webrtc"
 interface PeerRuntime {
   id: string; pc: RTCPeerConnection; channel?: RTCDataChannel; level: number; lastSwitch: number;
   local?: PeerTelemetry; remote?: PeerTelemetry; sample?: { at: number; bytes: number }; pendingIce: RTCIceCandidateInit[];
+  deliveryHist: number[]; rttHist: number[];
 }
 
 interface DecisionRecord {
   id: number;
   at: Date;
   controller: string;
-  source: "Q-table" | "Safety" | "Manual";
+  source: "Q-table" | "PPO" | "Safety" | "Manual";
   state: DiscreteState;
   qValue?: number;
   transitions: { client: string; from: number; to: number }[];
@@ -37,6 +41,7 @@ const SWITCH_AGE_LABELS = ["<4 s", "4–10 s", "≥10 s"];
 function explainDecision(state: DiscreteState, from: number[], to: number[], source: DecisionRecord["source"], capped: boolean) {
   let reason: string;
   if (source === "Manual") reason = "Applied the host's manual quality override.";
+  else if (source === "PPO") reason = "The exported PPO policy chose the highest-scoring allowed level for each viewer.";
   else if (source === "Q-table") reason = "Matched this state in the trained table and chose the action with the highest Q-value.";
   else if (state.freeze) reason = "Recent freezing or frame drops triggered a safety downgrade.";
   else if (state.headroom === 0 || state.delivery <= 1) reason = "Delivery is below the current target, so quality was reduced or held.";
@@ -59,7 +64,8 @@ export default function HostPage() {
   const [error, setError] = useState("");
   const [decisions, setDecisions] = useState<DecisionRecord[]>([]);
   const [persistent, setPersistent] = useState(true);
-  const [adaptationMode, setAdaptationMode] = useState<RewardMode | "manual">("balanced");
+  const [controllerKind, setControllerKind] = useState<"qtable" | "ppo" | "manual">("qtable");
+  const [adaptationMode, setAdaptationMode] = useState<RewardMode>("balanced");
   const [manualLevel, setManualLevel] = useState(2);
   const [busy, setBusy] = useState("");
   const [capabilities, setCapabilities] = useState({ file: false, camera: false, screen: false });
@@ -132,7 +138,7 @@ export default function HostPage() {
     if (!session || !source.current) return;
     peers.current.get(viewerId)?.pc.close();
     const pc = new RTCPeerConnection({ iceServers: iceServers.current });
-    const runtime: PeerRuntime = { id: viewerId, pc, level: 0, lastSwitch: Date.now(), pendingIce: [] };
+    const runtime: PeerRuntime = { id: viewerId, pc, level: 0, lastSwitch: Date.now(), pendingIce: [], deliveryHist: [], rttHist: [] };
     peers.current.set(viewerId, runtime);
     source.current.getTracks().forEach((track) => pc.addTrack(track, source.current!));
     const channel = pc.createDataChannel("telemetry", { ordered: true }); runtime.channel = channel;
@@ -200,25 +206,57 @@ export default function HostPage() {
       const age = Math.min(...active.map((peer) => (Date.now() - peer.lastSwitch) / 1000));
       const state = discretizeState(telemetry, current, age);
       const viewerCount = active.length as 1 | 2;
-      const policy = adaptationMode === "manual" ? undefined : await getPolicyForMode(viewerCount, adaptationMode);
-      const selected = adaptationMode === "manual"
-        ? { levels: Array(viewerCount).fill(manualLevel) as number[], qValue: 0, fallback: false }
-        : selectAction(policy, state, viewerCount, adaptationMode);
+      active.forEach((peer, index) => {
+        const t = telemetry[index];
+        peer.deliveryHist = [...peer.deliveryHist, t.outboundBitrate ? t.inboundBitrate / Math.max(t.outboundBitrate, 1) : 1].slice(-4);
+        peer.rttHist = [...peer.rttHist, t.rtt].slice(-4);
+      });
       const allowed = supportedLevelIds(source.current!);
-      const appliedLevels = active.map((_, index) => Math.max(...allowed.filter((level) => level <= (selected.levels[index] ?? 0)), allowed[0]));
-      const capped = appliedLevels.some((level, index) => level !== selected.levels[index]);
+      let decision: { levels: number[]; qValue?: number; source: "qtable" | "ppo" | "safety" | "manual"; name?: string };
+      if (controllerKind === "manual") {
+        decision = { levels: Array(viewerCount).fill(manualLevel) as number[], source: "manual" };
+      } else if (controllerKind === "ppo") {
+        const mlpPolicy = await getMlpPolicyForMode(viewerCount, adaptationMode);
+        if (!mlpPolicy) {
+          decision = { levels: selectAction(undefined, state, viewerCount, adaptationMode).levels, source: "safety" };
+        } else {
+          const viewersRaw: ViewerRaw[] = active.map((peer, index) => ({
+            headroom: telemetry[index].availableOutgoingBitrate
+              ? telemetry[index].availableOutgoingBitrate! / QUALITY_LEVELS[current[index]].videoBitrate : 1,
+            delivery: telemetry[index].outboundBitrate ? telemetry[index].inboundBitrate / telemetry[index].outboundBitrate : 1,
+            rttMs: telemetry[index].rtt, loss: telemetry[index].packetLoss, jitterSec: telemetry[index].jitter,
+            freeze: (telemetry[index].impairmentSeverity ?? 0) >= 0.25, level: current[index],
+            switchAgeSec: (Date.now() - peer.lastSwitch) / 1000,
+            deliveryHist: peer.deliveryHist, rttHist: peer.rttHist,
+          }));
+          const aggregateHeadroom = telemetry.reduce((sum, t, i) => sum + (t.availableOutgoingBitrate ?? QUALITY_LEVELS[current[i]].videoBitrate), 0)
+            / Math.max(current.reduce((sum, level) => sum + QUALITY_LEVELS[level].videoBitrate, 0), 1);
+          const result = decidePpo(mlpPolicy, { viewers: viewersRaw, aggregateHeadroom, mode: adaptationMode },
+            telemetry, current, age, viewerCount, active.map(() => allowed));
+          decision = { levels: result.levels, qValue: result.qValue, source: result.source, name: mlpPolicy.profile.name };
+        }
+      } else {
+        const policy = await getPolicyForMode(viewerCount, adaptationMode);
+        const result = decideQTable(policy, telemetry, current, age, viewerCount, adaptationMode);
+        decision = { levels: result.levels, qValue: result.qValue, source: result.source, name: policy?.profile.name };
+      }
+      const appliedLevels = active.map((_, index) => Math.max(...allowed.filter((level) => level <= (decision.levels[index] ?? 0)), allowed[0]));
+      const capped = appliedLevels.some((level, index) => level !== decision.levels[index]);
+      const fallback = decision.source === "safety";
       await Promise.all(active.map(async (peer, index) => {
         const desired = appliedLevels[index];
         if (desired !== peer.level) peer.lastSwitch = Date.now();
         peer.level = desired;
         await applyQuality(peer.pc, desired, source.current!.getVideoTracks()[0]?.getSettings().height);
-        if (peer.channel?.readyState === "open") peer.channel.send(JSON.stringify({ type: "quality", level: desired, fallback: selected.fallback, mode: adaptationMode }));
+        if (peer.channel?.readyState === "open") peer.channel.send(JSON.stringify({ type: "quality", level: desired, fallback, mode: controllerKind === "manual" ? "manual" : adaptationMode }));
       }));
-      const controller = adaptationMode === "manual" ? "Manual override" : selected.fallback ? `${adaptationMode} safety controller` : policy?.profile.name;
-      const sourceType: DecisionRecord["source"] = adaptationMode === "manual" ? "Manual" : selected.fallback ? "Safety" : "Q-table";
+      const sourceType: DecisionRecord["source"] = decision.source === "manual" ? "Manual" : decision.source === "ppo" ? "PPO" : decision.source === "safety" ? "Safety" : "Q-table";
+      const controller = decision.source === "manual" ? "Manual override"
+        : decision.source === "safety" ? `${adaptationMode} safety controller`
+        : decision.name ?? `${adaptationMode} ${decision.source === "ppo" ? "PPO" : "Q-table"}`;
       const record: DecisionRecord = {
-        id: Date.now(), at: new Date(), controller: controller ?? adaptationMode, source: sourceType, state,
-        qValue: sourceType === "Q-table" ? selected.qValue : undefined,
+        id: Date.now(), at: new Date(), controller, source: sourceType, state,
+        qValue: sourceType === "Q-table" || sourceType === "PPO" ? decision.qValue : undefined,
         transitions: active.map((peer, index) => ({ client: peer.id.slice(-4).toUpperCase(), from: current[index], to: appliedLevels[index] })),
         reason: explainDecision(state, current, appliedLevels, sourceType, capped),
       };
@@ -226,7 +264,7 @@ export default function HostPage() {
       syncPeers();
     }, 2000);
     return () => clearInterval(timer);
-  }, [adaptationMode, manualLevel, session]);
+  }, [adaptationMode, controllerKind, manualLevel, session]);
 
   async function endRoom() {
     if (session) await leaveRoom(session).catch(() => undefined);
@@ -251,9 +289,10 @@ export default function HostPage() {
           <div className="metric-grid"><Metric label="Quality" value={QUALITY_LEVELS[peer.level].name} /><Metric label="ICE state" value={peer.pc.iceConnectionState} /><Metric label="Outbound" value={formatBitrate(peer.local?.outboundBitrate ?? 0)} /><Metric label="RTT" value={`${Math.round(peer.local?.rtt ?? 0)} ms`} /><Metric label="Loss" value={`${((peer.remote?.packetLoss ?? peer.local?.packetLoss ?? 0) * 100).toFixed(1)}%`} /></div>
         </article>)}
       </div>
-      <div className="panel form-grid compact"><label>Adaptation mode<select value={adaptationMode} onChange={(event) => setAdaptationMode(event.target.value as RewardMode | "manual")}><option value="balanced">Balanced RL</option><option value="quality">Quality RL</option><option value="stall-avoidant">Stall Avoidant RL</option><option value="manual">Manual quality</option></select></label>
-        {adaptationMode === "manual" && <label>Quality level<select value={manualLevel} onChange={(event) => setManualLevel(Number(event.target.value))}>{QUALITY_LEVELS.map((level) => <option key={level.id} value={level.id}>{level.name} — {formatBitrate(level.videoBitrate)}</option>)}</select></label>}
-        {adaptationMode !== "manual" && <p className="mode-help">A matching trained Q-table is used when available. Otherwise the safety controller probes upward after a stable interval instead of remaining at Economy.</p>}
+      <div className="panel form-grid compact"><label>Controller<select value={controllerKind} onChange={(event) => setControllerKind(event.target.value as typeof controllerKind)}><option value="qtable">Q-table RL</option><option value="ppo">PPO (exported policy)</option><option value="manual">Manual quality</option></select></label>
+        {controllerKind !== "manual" && <label>QoE objective<select value={adaptationMode} onChange={(event) => setAdaptationMode(event.target.value as RewardMode)}><option value="balanced">Balanced</option><option value="quality">Quality</option><option value="stall-avoidant">Stall Avoidant</option></select></label>}
+        {controllerKind === "manual" && <label>Quality level<select value={manualLevel} onChange={(event) => setManualLevel(Number(event.target.value))}>{QUALITY_LEVELS.map((level) => <option key={level.id} value={level.id}>{level.name} — {formatBitrate(level.videoBitrate)}</option>)}</select></label>}
+        {controllerKind !== "manual" && <p className="mode-help">A matching {controllerKind === "ppo" ? "imported PPO policy" : "trained Q-table"} is used when available. Otherwise the safety controller probes upward after a stable interval instead of remaining at Economy.</p>}
       </div>
       <a className="text-link" href="/train">Train or activate another policy →</a>
     </aside>

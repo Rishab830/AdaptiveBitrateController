@@ -1,4 +1,5 @@
 import { QUALITY_LEVELS, REWARD_WEIGHTS } from "./levels";
+import { safetyDecision } from "./policy/safety";
 import type { DiscreteState, EvaluationSummary, PeerTelemetry, PolicyProfile, QTableArtifact } from "./types";
 
 const bins = (value: number, edges: number[]) => edges.findIndex((edge) => value < edge) === -1
@@ -187,15 +188,5 @@ export function selectAction(policy: QTableArtifact | undefined, state: Discrete
     const action = values.indexOf(Math.max(...values));
     return { levels: decodeAction(action, viewers), qValue: values[action], fallback: false };
   }
-  let safeLevel = state.currentA;
-  const unhealthy = state.freeze === 1 || state.headroom === 0 || state.delivery === 0 || state.loss >= 3;
-  if (unhealthy) safeLevel -= mode === "stall-avoidant" ? 2 : 1;
-  else {
-    const stableEnough = state.delivery >= 2 && state.loss <= 1;
-    const shouldProbe = mode === "quality" ? state.switchAge >= 1 : mode === "balanced" ? state.switchAge === 2 : state.headroom >= 3 && state.switchAge === 2;
-    if (stableEnough && shouldProbe) safeLevel += 1;
-    if (state.headroom >= 3 && state.delivery >= 2) safeLevel += 1;
-  }
-  safeLevel = Math.max(0, Math.min(4, safeLevel));
-  return { levels: Array(viewers).fill(safeLevel) as number[], qValue: 0, fallback: true };
+  return safetyDecision(state, viewers, mode);
 }

@@ -104,3 +104,45 @@ export interface TrainingProgress {
   total: number;
   reward: number;
 }
+
+export interface ObsSpecNormalization {
+  headroomScale: number; rttMsScale: number; jitterSecScale: number;
+  levelMax: number; switchAgeSecScale: number; aggregateHeadroomScale: number;
+}
+
+export interface ObsSpec {
+  version: number; maxViewers: number; historyLen: number; actionLevels: number;
+  rewardModes: RewardMode[]; features: string[]; normalization: ObsSpecNormalization;
+  neutralSlot: Record<string, number>;
+}
+
+export interface MlpLayer { W: number[][]; b: number[]; }
+
+export interface MlpPolicyProfile {
+  name: string;
+  rewardModes: RewardMode[];    // modes this single model was trained to serve
+  viewers: (1 | 2)[];
+  sourceSeed?: number;
+}
+
+export interface MlpPolicyArtifact {
+  schemaVersion: 3;
+  kind: "mlp";
+  id: string;
+  createdAt: string;
+  profile: MlpPolicyProfile;
+  obsSpec: ObsSpec;
+  layers: MlpLayer[];
+  evaluation: EvaluationSummary;
+}
+
+// QTableArtifact keeps schemaVersion: 2 unchanged for backward compatibility;
+// `kind` is optional there and defaults to "qtable" when absent.
+export type PolicyArtifact = (QTableArtifact & { kind?: "qtable" }) | MlpPolicyArtifact;
+
+export function isMlpPolicy(p: PolicyArtifact): p is MlpPolicyArtifact {
+  return p.schemaVersion === 3 && (p as MlpPolicyArtifact).kind === "mlp";
+}
+export function isQTablePolicy(p: PolicyArtifact): p is QTableArtifact {
+  return p.schemaVersion === 2;
+}

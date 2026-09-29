@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "maxViewers": 2,
+  "historyLen": 4,
+  "actionLevels": 5,
+  "rewardModes": ["balanced", "quality", "stall-avoidant"],
+  "comment": "Feature order is the contract between lib/policy/spec.ts and training/envs/live_webrtc_env.py. Both build this vector from raw per-viewer telemetry, never from the discretized Q-table bins. Per-viewer blocks are always emitted for slot 0 and slot 1; when viewers=1, slot 1 is filled with neutral values (NEUTRAL_SLOT) rather than omitted, so one exported model can serve both room sizes.",
+  "features": [
+    "viewer_count",
+    "headroom_0", "headroom_1",
+    "delivery_0", "delivery_1",
+    "rtt_0", "rtt_1",
+    "loss_0", "loss_1",
+    "jitter_0", "jitter_1",
+    "freeze_0", "freeze_1",
+    "level_0", "level_1",
+    "switch_age_0", "switch_age_1",
+    "aggregate_headroom",
+    "delivery_hist_0_0", "delivery_hist_0_1", "delivery_hist_0_2", "delivery_hist_0_3",
+    "delivery_hist_1_0", "delivery_hist_1_1", "delivery_hist_1_2", "delivery_hist_1_3",
+    "rtt_hist_0_0", "rtt_hist_0_1", "rtt_hist_0_2", "rtt_hist_0_3",
+    "rtt_hist_1_0", "rtt_hist_1_1", "rtt_hist_1_2", "rtt_hist_1_3",
+    "mode_balanced", "mode_quality", "mode_stall_avoidant"
+  ],
+  "normalization": {
+    "headroomScale": 3.0,
+    "rttMsScale": 400.0,
+    "jitterSecScale": 0.15,
+    "levelMax": 4.0,
+    "switchAgeSecScale": 20.0,
+    "aggregateHeadroomScale": 3.0
+  },
+  "neutralSlot": {
+    "headroom": 1.0, "delivery": 1.0, "rtt": 0.0, "loss": 0.0,
+    "jitter": 0.0, "freeze": 0.0, "level": 0.0, "switchAge": 20.0
+  }
+}
