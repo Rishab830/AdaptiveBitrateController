@@ -2,7 +2,7 @@
 
 ## Abstract
 
-Flux treats WebRTC encoding selection as a sequential decision problem. Network capacity, contention, latency, loss, and decoding health evolve during a stream, while each bitrate decision affects immediate visual quality and subsequent congestion. A tabular Q-learning controller learns a mapping from discretized connection state to one or two simultaneous bitrate levels. Training happens locally from seeded synthetic traces; runtime sessions perform inference only.
+Flux treats WebRTC encoding selection as a sequential decision problem. Network capacity, contention, latency, loss, and decoding health evolve during a stream, while each bitrate decision affects immediate visual quality and subsequent congestion. Two learned controllers map connection state to one or two simultaneous bitrate levels: a tabular Q-learning policy trained locally from seeded synthetic traces, and a PPO policy trained offline in Python. Runtime sessions perform inference only.
 
 ## Architecture and privacy
 
@@ -20,25 +20,31 @@ The reward is:
 
 `quality reward - freeze/overload penalty - switching penalty - underutilization penalty`
 
-The switching term discourages oscillation and large jumps. The quality and underutilization terms discourage remaining at a low level when the path can sustain more. Impairment is proportional rather than binary: a few isolated dropped frames are tolerated, while concentrated frame loss, long freezes, and material capacity overload receive progressively larger penalties. Three weight sets expose Balanced, Quality, and Stall Avoidant objectives.
+The switching term discourages oscillation and large jumps. The quality and underutilization terms discourage remaining at a low level when the path can sustain more. Impairment is proportional rather than binary: a few isolated dropped frames are tolerated, while concentrated frame loss, long freezes, and material capacity overload receive progressively larger penalties. Three weight sets expose Balanced, Quality, and Stall Avoidant objectives. The same weights are used by the TypeScript trainer and the Python PPO environment.
 
 ## Learning and deployment
+
+### Tabular Q-learning
 
 Training uses epsilon-greedy tabular Q-learning with learning rate 0.1, discount factor 0.95, and epsilon decaying from 1.0 to 0.05. A seeded generator varies capacity, volatility, RTT, loss, and viewer contention. Tables are sparse maps keyed by the discretized state, making export and inspection straightforward.
 
 An unseen live state invokes a conservative state-based decision and is visibly labelled as a fallback. This is preferable to interpreting an all-zero unseen row as evidence for an arbitrary action. Live inference never mutates an active policy, preserving repeatability.
 
+### PPO
+
+The PPO controller uses sb3-contrib MaskablePPO with a 128×128 tanh MLP and a per-viewer categorical head (five logits per viewer). It trains on a simulator that steps once per two-second adaptation cycle, with regime-switching uplink and downlink traces and a GCC-like capacity estimator that ramps up slowly and backs off quickly. Episodes end by time limit and are reported as truncations so that value bootstrapping is preserved. Unlike the Q-table, PPO consumes continuous, normalized features (including short delivery and RTT histories) rather than bins. The feature order and normalization constants live in `shared/obs-spec.json`, which both the Python environment and the TypeScript runtime read, and one model serves all three objectives through a one-hot mode input. The actor network is exported as plain weight matrices and evaluated in the browser without a ML runtime. At decision time, source-capability masking removes unsupported levels, and a guard hands control to the safety controller when the network proposes a jump of more than two levels during an active freeze. Logit magnitudes are shown as a score in the decision table; they are not Q-values.
+
 ## Evaluation
 
-The training dashboard reports mean simulated reward, mean level, freeze rate, switch rate, underutilization, and visited state count. Deterministic tests verify state bins, joint-action encoding, reward ordering, Q-table reproducibility, and exact-table versus fallback selection. Signaling tests cover participant limits, authentication, targeted messages, leaving, and slot reuse.
+The training dashboard reports mean simulated reward, mean level, freeze rate, switch rate, underutilization, and visited state count for Q-tables. For PPO, `training/evaluate.py` runs 200 held-out episodes (seeds disjoint from training) and reports per-step reward, mean level, freeze rate, switch rate, and underutilization against the safety controller and a rate-based heuristic; these numbers are embedded in the exported policy. Deterministic tests verify state bins, joint-action encoding, reward ordering, Q-table reproducibility, exact-table versus fallback selection, the observation contract, MLP forward pass, action masking, and the PPO safety handoff. Signaling tests cover participant limits, authentication, targeted messages, leaving, and slot reuse.
 
-For an experiment, train all three reward modes with the same profile and seed, then repeat the same browser-throttling schedule. Record average delivered bitrate, freeze/frame-drop count, switch count, loss, and RTT from the host dashboard. Expected behavior is higher average levels from Quality and fewer overload events from Stall Avoidant; Balanced should lie between them.
+For a live experiment, train all three reward modes with the same profile and seed, then repeat the same browser-throttling schedule. Record average delivered bitrate, freeze/frame-drop count, switch count, loss, and RTT from the host dashboard. Expected behavior is higher average levels from Quality and fewer overload events from Stall Avoidant; Balanced should lie between them.
 
 ## Limitations and future work
 
 - Browser-reported bandwidth estimates and Network Information hints are not universally available.
 - WebRTC has its own congestion controller, so the RL action is an upper bound rather than exact wire bitrate.
 - Local media and screen capture support differs by mobile browser.
-- Synthetic training traces may not represent every real network or encoder.
+- Synthetic training traces may not represent every real network or encoder; the PPO simulator's congestion model is a simplification of real GCC behavior.
 - Peer-to-peer fan-out does not scale beyond a small room; larger broadcasts should introduce an SFU.
-- Future versions could learn from privacy-preserving session summaries, use function approximation, issue expiring TURN credentials, and synchronize policies across authenticated devices.
+- Future versions could learn from privacy-preserving session summaries, train PPO on recorded real traces, issue expiring TURN credentials, and synchronize policies across authenticated devices.
