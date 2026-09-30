@@ -83,7 +83,7 @@ export async function collectTelemetry(pc: RTCPeerConnection, direction: "inboun
   return { telemetry, sample: { at: now, bytes, packetsLost, packetsTotal, framesDropped, framesDecoded, freezeCount, freezeDuration, jitterBufferDelay, jitterBufferEmitted } };
 }
 
-export async function applyQuality(pc: RTCPeerConnection, levelId: number, sourceHeight = 1080) {
+export async function applyQuality(pc: RTCPeerConnection, levelId: number, sourceHeight = 1080, force = false) {
   const level = QUALITY_LEVELS[Math.max(0, Math.min(QUALITY_LEVELS.length - 1, levelId))];
   const results: string[] = [];
   for (const sender of pc.getSenders()) {
@@ -94,7 +94,7 @@ export async function applyQuality(pc: RTCPeerConnection, levelId: number, sourc
       parameters.encodings[0].maxBitrate = level.videoBitrate;
       parameters.encodings[0].maxFramerate = level.frameRate;
       parameters.encodings[0].scaleResolutionDownBy = Math.max(1, sourceHeight / level.height);
-      parameters.degradationPreference = "maintain-framerate";
+      parameters.degradationPreference = force ? "maintain-resolution" : "maintain-framerate";
     } else if (sender.track.kind === "audio") {
       parameters.encodings[0].maxBitrate = level.audioBitrate;
     }

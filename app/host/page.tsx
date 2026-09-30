@@ -240,14 +240,16 @@ export default function HostPage() {
         const result = decideQTable(policy, telemetry, current, age, viewerCount, adaptationMode);
         decision = { levels: result.levels, qValue: result.qValue, source: result.source, name: policy?.profile.name };
       }
-      const appliedLevels = active.map((_, index) => Math.max(...allowed.filter((level) => level <= (decision.levels[index] ?? 0)), allowed[0]));
-      const capped = appliedLevels.some((level, index) => level !== decision.levels[index]);
+      const appliedLevels = controllerKind === "manual"
+        ? active.map(() => manualLevel)
+        : active.map((_, index) => Math.max(...allowed.filter((level) => level <= (decision.levels[index] ?? 0)), allowed[0]));
+      const capped = controllerKind !== "manual" && appliedLevels.some((level, index) => level !== decision.levels[index]);
       const fallback = decision.source === "safety";
       await Promise.all(active.map(async (peer, index) => {
         const desired = appliedLevels[index];
         if (desired !== peer.level) peer.lastSwitch = Date.now();
         peer.level = desired;
-        await applyQuality(peer.pc, desired, source.current!.getVideoTracks()[0]?.getSettings().height);
+        await applyQuality(peer.pc, desired, source.current!.getVideoTracks()[0]?.getSettings().height, controllerKind === "manual");
         if (peer.channel?.readyState === "open") peer.channel.send(JSON.stringify({ type: "quality", level: desired, fallback, mode: controllerKind === "manual" ? "manual" : adaptationMode }));
       }));
       const sourceType: DecisionRecord["source"] = decision.source === "manual" ? "Manual" : decision.source === "ppo" ? "PPO" : decision.source === "safety" ? "Safety" : "Q-table";

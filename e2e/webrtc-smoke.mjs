@@ -54,6 +54,9 @@ try {
     console.error("Latest decisions:", await host.locator(".decision-table tbody").textContent());
     throw error;
   }
+  await host.getByLabel("Controller").selectOption("manual");
+  await host.getByLabel("Quality level").selectOption("4");
+  await viewer.locator(".quality-badge").filter({ hasText: "Ultra · manual" }).waitFor({ timeout: 6_000 });
 
   await secondViewer.goto(`${baseURL}/viewer`);
   await secondViewer.getByPlaceholder("ABC234").fill(code);
